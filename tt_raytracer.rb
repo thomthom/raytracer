@@ -28,8 +28,8 @@ module TT::Plugins::Raytracer
   
   # Preference
   @settings = TT::Settings.new( PLUGIN_ID )
-  @settings[:ray_stop_at_ground, false]
-  @settings[:rayspray_number, 32]
+  @settings.set_default(:ray_stop_at_ground, false)
+  @settings.set_default(:rayspray_number, 32)
   
   
   ### MENU & TOOLBARS ### --------------------------------------------------
@@ -46,6 +46,7 @@ module TT::Plugins::Raytracer
     m.add_item('Grow Components from CPoints')  { self.grow_instances_from_cpoints_ui }
     m.add_separator
     m.add_item('Trace Ray Spray from CPoints')  { self.spray_raytrace }
+    m.add_item('Spraycan')  { self.spray }
     m.add_separator
     mnu = m.add_item('Rays Stops at Ground Plane') { self.toggle_ray_stop_at_ground }
     m.set_validation_proc(mnu) { vproc_ray_stop_at_ground }
@@ -78,6 +79,297 @@ module TT::Plugins::Raytracer
   
   
   ### MAIN SCRIPT ### ------------------------------------------------------
+  
+  # http://www.anderswallin.net/2009/05/uniform-random-points-in-a-circle-using-polar-coordinates/
+  #
+  # @since 1.2.0
+  def self.spray
+    
+    # Selected components will be used for spraying.
+    
+    # === Toolbar ===
+    # 
+    # Spray Tool
+    # -----
+    # Flood (Toggle)
+    # Stack (Toggle)
+    # Random Size (Toggle)
+    # Filter (Toggle)
+    # -----
+    # Settings
+    
+    # === Settings ===
+    # Target Layer
+    # Filter Layer
+    
+    # === VCB ===
+    # Radius
+    # Pressure
+
+
+    model = Sketchup.active_model
+    instances = model.selection.select { |e| TT::Instance.is?(e) }
+
+    if instances.empty?
+      UI.messagebox( 'Select one or more group or component.' )
+      return false
+    end
+    
+    definitions = instances.map { |i| TT::Instance.definition(i) }.uniq
+    model.select_tool( SprayCan.new(definitions) )
+  end
+  
+  # @since 1.2.0
+  class SprayCan
+    
+    def initialize(definitions)
+      @definitions = definitions
+
+      @ip_mouse = Sketchup::InputPoint.new
+      
+      @pick = nil
+      @mouse_ray = nil
+      @mouse_points = []
+      
+      @ray = nil
+      @normal = Z_AXIS
+      @points = []
+      @radius = 20.m
+      
+      @mouse_down_time = nil
+      @last_spray = nil
+      
+      @timer = nil
+    end
+    
+    def resume( view )
+      view.invalidate
+      update_ui()
+    end
+    
+    def activate
+      update_ui()
+    end
+    
+    def deactivate( view )
+      view.invalidate
+    end
+    
+    def update_ui
+      Sketchup.vcb_label = 'Radius'
+      Sketchup.vcb_value = @radius 
+    end
+    
+    def enableVCB?
+      return true
+    end
+    
+    def onUserText( text, view )
+      radius = text.to_l
+    rescue
+      radius = @radius
+    ensure
+      @radius = radius
+      @source_point = @pick_point.offset( @normal, @radius * 2 )
+      view.invalidate
+      update_ui()
+    end
+    
+    def onLButtonDown( flags, x, y, view )
+      @mouse_down_time = Time.now
+      squeeze( view )
+      #@timer = UI.start_timer( 0.1, true ) {
+      #  do_spray( view )
+      #}
+    end
+    
+    def squeeze( view )
+      diff = Time.now - @mouse_down_time
+      time_to_max = 3.0
+      interval_max = 0.01
+      interval_min = 0.1
+      interval_diff = interval_min - interval_max
+      ratio = interval_min - ( diff / time_to_max ) * interval_diff # 0.1 - 0.01
+      #ratio = 0.1 - ( diff / time_to_max ) * 0.09 # 0.1 - 0.01
+      
+      if !@timer || diff < time_to_max
+        UI.stop_timer( @timer ) if @timer
+        @timer = UI.start_timer( ratio, true ) {
+          squeeze( view )
+        }
+      end
+      
+      do_spray( view )
+    end
+    
+    def do_spray( view )
+      if @ray
+        @last_spray = Time.now
+        @mouse_points = trace_spray( @ray, @radius, view, false )
+        @points.concat( @mouse_points )
+        view.invalidate
+      end
+    end
+    
+    def onLButtonUp( flags, x, y, view )
+      UI.stop_timer( @timer ) if @timer
+      @mouse_points.clear
+      @mouse_down_time = nil
+
+      size = @definitions.size
+      TT::Model.start_operation('Spraycan')
+      for point in @points
+        index = rand(size)
+        definition = @definitions[index]
+        tr = Geom::Transformation.new( point )
+        view.model.active_entities.add_instance( definition, tr )
+      end
+      view.model.commit_operation
+      @points.clear
+
+      view.invalidate
+    end
+    
+    def onMouseMove( flags, x, y, view )
+      #@ip_mouse.pick( view, x, y )
+      
+      #@mouse_points.clear
+      
+      @mouse_ray = view.pickray( x, y )
+      @pick = view.model.raytest( @mouse_ray  )
+      
+      if @pick
+        
+        # Pick ray normal.
+        if flags & CONSTRAIN_MODIFIER_MASK == 0
+          pick_path = @pick[1]
+          entity = pick_path.pop
+          if entity.is_a?( Sketchup::Face )
+            transformation = Geom::Transformation.new
+            for e in pick_path
+              next unless e.respond_to?( :transformation )
+              transformation *= e.transformation
+            end
+            @normal = entity.normal.transform( transformation )
+          else
+            @normal = Z_AXIS
+          end
+        end
+        
+        # Calculate spray ray.
+        @pick_point = @pick[0]
+        @source_point = @pick_point.offset( @normal, @radius * 2 )
+        #@ray = [ @source_point, @normal.reverse ]
+        vector = @source_point.vector_to( @pick_point )
+        @ray = [ @source_point, vector ]
+        
+        #@mouse_points = trace_spray( @ray, @radius, view, false )
+      end
+      
+      # Add points to stack if mouse button is held.
+      if flags & MK_LBUTTON == MK_LBUTTON
+        diff = Time.now - @last_spray
+        if diff > 0.1
+          @mouse_points = trace_spray( @ray, @radius, view, false )
+          @points.concat( @mouse_points )
+        end
+      end
+      
+      view.invalidate
+      #view.refresh
+    end
+    
+    def draw( view )
+      if @ip_mouse.display?
+        @ip_mouse.draw( view )
+      end
+      
+      if @pick
+        pt1 = @pick[0]
+        #size = view.pixels_to_model( 100, pt1 )
+        #pt2 = pt1.offset( Z_AXIS, size )
+        pt2 = pt1.offset( @normal, @radius * 2 )
+        
+        points = [ @source_point, @pick_point ]
+        circle = TT::Geom3d.circle( @pick_point, @normal, @radius, 48 )
+        
+        12.times { |i|
+          points << @source_point
+          points << circle[i*4]
+        }
+        
+        view.line_stipple = '-'
+        view.line_width = 1
+        view.drawing_color = [255,128,0]
+        view.draw( GL_LINES, points )
+        
+        view.line_stipple = ''
+        view.draw( GL_LINE_LOOP, circle )
+        view.drawing_color = [255,128,0,26]
+        view.draw( GL_POLYGON, circle )
+      end
+      
+      if @pick_point
+        view.line_stipple = ''
+        view.line_width = 2
+        view.draw_points( @pick_point, 8, 4, 'purple' )
+      end
+      
+      if @source_point
+        view.line_stipple = ''
+        view.line_width = 2
+        view.draw_points( @source_point, 8, 4, 'blue' )
+      end 
+      
+      unless @mouse_points.empty?
+        view.line_stipple = ''
+        view.line_width = 2
+        view.draw_points( @mouse_points, 6, 3, [128,255,0] )
+        
+        pts = @mouse_points.map { |pt| [ @source_point, pt ] }.flatten
+        view.line_width = 1
+        view.drawing_color = [0,0,255]
+        view.draw( GL_LINES, pts )
+      end
+      
+      unless @points.empty?
+        view.line_stipple = ''
+        view.line_width = 2
+        view.draw_points( @points, 6, 3, [255,0,0] )
+      end
+    end
+
+    
+    def trace_spray( ray, radius, view, uniform = true, density = 2 )
+      points = []
+      source, direction = ray
+      target = source.offset( direction )
+      tr = Geom::Transformation.new( target, direction )
+      density.times {
+        #x, y, z = target.to_a
+        angle = rand() * 2 * Math::PI
+        if uniform
+          random_radius = radius * Math.sqrt( rand() )
+        else
+          random_radius = radius * rand()
+        end
+        x = random_radius * Math.sin( angle )
+        y = random_radius * Math.cos( angle )
+        random_point = Geom::Point3d.new( x, y, 0 )
+        random_point.transform!( tr )
+
+        #current_ray = [ random_point, direction ]
+        current_ray = [ source, random_point ]
+        result = view.model.raytest( current_ray )
+        next unless result
+        points << result[0]
+      }
+      points
+    end
+    
+  end
+  
+  
   
   # Spray Trace Rays from CPoints
   # Shoots N given number of rays from each selected CPoint and generates groups
