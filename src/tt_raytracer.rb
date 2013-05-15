@@ -12,14 +12,14 @@ require 'extensions.rb'
 
 module TT
  module Plugins
-  module Template
+  module Raytracer
   
   ### CONSTANTS ### ------------------------------------------------------------
   
   # Plugin information
-  PLUGIN_ID       = 'TT_Untitled'.freeze
-  PLUGIN_NAME     = 'Untitled Plugin'.freeze
-  PLUGIN_VERSION  = '1.0.0'.freeze
+  PLUGIN_ID       = 'TT_Raytracer'.freeze
+  PLUGIN_NAME     = 'Raytracer'.freeze
+  PLUGIN_VERSION  = '1.3.0'.freeze
   
   # Resource paths
   FILENAMESPACE = File.basename( __FILE__, '.rb' )
@@ -32,14 +32,14 @@ module TT
   unless file_loaded?( __FILE__ )
     loader = File.join( PATH, 'core.rb' )
     ex = SketchupExtension.new( PLUGIN_NAME, loader )
-    ex.description = 'Lorem ipsum dolor sit amet.'
+    ex.description = 'Freakkin rays with laserbeams!'
     ex.version     = PLUGIN_VERSION
-    ex.copyright   = 'Thomas Thomassen © 2013'
+    ex.copyright   = 'Thomas Thomassen © 2010–2013'
     ex.creator     = 'Thomas Thomassen (thomas@thomthom.net)'
     Sketchup.register_extension( ex, true )
   end
   
-  end # module Template
+  end # module Raytracer
  end # module Plugins
 end # module TT
 
